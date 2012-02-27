@@ -1,0 +1,102 @@
+#!/usr/bin/env ruby
+
+require 'sqlite3'
+require 'date'
+
+extension = '.md'
+source_link_key = 'sendto'
+inputs = []
+output_dir = ''
+
+if ARGV.empty?
+  puts <<-HELP
+wp2oak [--output=DIR] [--extension=.md] [--source-link=='sendto'] wp_posts.db ...
+Converts WordPress SQLite3 databases to OakTree sources.
+
+Options:
+  -o DIR, --output=DIR
+    Set the output directory for your Markdown sources.
+    Defaults to the current directory.
+  
+  -e EXT, --extension=EXT
+    Sets the file extension for your Markdown sources.
+    Defaults to '.md'
+  
+  -s KEY, --source-link=KEY
+    Specifies the source link key.  These are used to create link posts.
+    Defaults to 'sendto'.
+HELP
+end
+
+args = ARGV[0..-1]
+until args.empty?
+  arg = args.shift
+  
+  # finnagling with arguments
+  if arg =~ /^(--[^=]+)=(.*)$/
+    arg = $1
+    args.unshift $2
+  end
+  
+  if arg =~ /^(-[ose])(.+)$/
+    arg = $1
+    args.unshift $2
+  end
+  
+  case arg
+    when '-o', '--output'
+      output_dir = args.shift
+    when '-s', '--source-link'
+      source_link_key = args.shift
+    when '-e', '--extension'
+      extension = args.shift
+    else
+      inputs << arg
+  end
+end
+
+output_dir = "#{output_dir}/" unless output_dir.empty? && ! output_dir.end_with?('/')
+extension = ".#{extension}" unless extension.start_with?('.')
+
+inputs.each { |in_db|
+  SQLite3::Database.new(in_db) { |db|
+    db.execute('SELECT `ID`, `post_date`, `post_content`, `post_title`, `post_status`, `post_type` FROM `wp_posts`') { |row|
+      # skip unless the post has been published and it is actually a post
+      # (that is, it's not a post revision or something)
+      next if row[4] != 'publish' || row[5] != 'post'
+      
+      next if (time = row[1]).start_with? '0000'
+      
+      # generic content grabbery
+      time = DateTime.parse(row[1])
+      content = row[2].gsub('\r','').gsub('\n', "\n").gsub('\"', '"')
+      title = row[3]
+      slug = title.gsub(/[\n\t]+/, '').strip.gsub(/[^_\w\s]/, '').strip.gsub(/\s+/, '_').downcase
+      fname = output_dir + "#{time.strftime '%Y-%m-%d'}_#{slug}#{extension}"
+    
+      # get any source links (these're specified by "sendto" unless a different key is passed)
+      linkid = nil
+      link = nil
+      
+      unless source_link_key.empty?
+        db.execute("SELECT `post_id`, `meta_id`, `meta_key`, `meta_value` FROM `wp_postmeta` WHERE `meta_key` = '#{source_link_key}' AND `post_id` = #{row[0]}") {
+          |metarow|
+          # basically, use the most recent incarnation of the pair (based on the meta ID)
+          mid = metarow[1].to_i
+          if linkid.nil? || linkid < mid
+            link = metarow[3]
+            linkid = mid
+          end
+        }
+      end
+      
+      File.open(fname, 'w') { |ios|
+        ios.write "title: #{title}\n"
+        ios.write "time: #{time}\n"
+        ios.write "link: #{link}\n" unless link.nil?
+        ios.write "----\n\n"
+        ios.write content
+      } 
+    }
+  }
+}
